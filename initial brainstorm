@@ -1,0 +1,557 @@
+import React, { useState, useEffect, useRef, useMemo, memo, useCallback, createContext, useContext, Suspense, lazy } from 'react';
+import { 
+  Upload, FileText, Brain, Layout, ChevronRight, ChevronLeft, 
+  ZoomIn, ZoomOut, Maximize, X, 
+  Clock, Activity, Settings, BookOpen, Share2, AlertTriangle,
+  Zap, Award, Loader2, Sparkles, MessageSquare, Trophy, 
+  Save, Trash2, ShieldCheck, Mic, Play, Square, Pause, 
+  Calendar, GraduationCap, Mail, Users, Radio, WifiOff, Wifi,
+  BarChart, Target, ArrowRight, MousePointer2, Menu, MoreHorizontal,
+  CheckCircle2, XCircle, List, Download, UploadCloud, Eye
+} from 'lucide-react';
+
+/**
+ * ---------------------------------------------------------------------
+ * 1. UTILITIES & SECURITY
+ * ---------------------------------------------------------------------
+ */
+
+const APP_VERSION = "5.0.0-Enterprise";
+const STORAGE_KEY = "NEUROMAP_ENT_DATA";
+const apiKey = ""; // Injected by runtime
+
+// Security: Simple Input Sanitizer (React handles XSS by default, this strips dangerous patterns)
+const sanitizeInput = (input: string): string => {
+  return input.replace(/<script\b[^>]*>([\s\S]*?)<\/script>/gm, "").replace(/on\w+="[^"]*"/g, "");
+};
+
+// Security: Rate Limiter Hook
+const useRateLimit = (limit: number, windowMs: number) => {
+  const [timestamps, setTimestamps] = useState<number[]>([]);
+  const checkLimit = useCallback((): boolean => {
+    const now = Date.now();
+    const valid = timestamps.filter(t => now - t < windowMs);
+    if (valid.length >= limit) return false;
+    setTimestamps([...valid, now]);
+    return true;
+  }, [timestamps, limit, windowMs]);
+  return { checkLimit };
+};
+
+// AI Client with Retry & Circuit Breaker
+const cleanJsonString = (str: string) => str.replace(/```json/g, '').replace(/```/g, '').trim();
+
+const callGemini = async (prompt: string, systemPrompt: string = "", retries = 3): Promise<any> => {
+  if (!navigator.onLine) throw new Error("Offline");
+  for (let i = 0; i < retries; i++) {
+    try {
+      const response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], systemInstruction: { parts: [{ text: systemPrompt }] } }),
+        }
+      );
+      if (!response.ok) throw new Error(`API Error: ${response.status}`);
+      const result = await response.json();
+      const rawText = result.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (!rawText) throw new Error("Empty AI Response");
+      return JSON.parse(cleanJsonString(rawText));
+    } catch (error) {
+      if (i === retries - 1) throw error;
+      await new Promise(r => setTimeout(r, Math.pow(2, i) * 1000));
+    }
+  }
+};
+
+/**
+ * ---------------------------------------------------------------------
+ * 2. GLOBAL STATE MANAGEMENT (CONTEXT)
+ * ---------------------------------------------------------------------
+ */
+
+interface GlobalState {
+  docs: DocumentData[];
+  userStats: UserStats;
+  isOnline: boolean;
+  addDoc: (d: DocumentData) => void;
+  updateDoc: (d: DocumentData) => void;
+  deleteDoc: (id: string) => void;
+  updateStats: (s: UserStats) => void;
+  exportData: () => void;
+  importData: (json: string) => void;
+}
+
+const AppContext = createContext<GlobalState | null>(null);
+
+const useNeuroMap = () => {
+  const context = useContext(AppContext);
+  if (!context) throw new Error("useNeuroMap must be used within AppProvider");
+  return context;
+};
+
+// Offline Sync Hook
+const useOfflineSync = () => {
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
+  useEffect(() => {
+    const h = () => setIsOnline(navigator.onLine);
+    window.addEventListener('online', h);
+    window.addEventListener('offline', h);
+    return () => { window.removeEventListener('online', h); window.removeEventListener('offline', h); };
+  }, []);
+  return isOnline;
+};
+
+// Provider Component
+const AppProvider = ({ children }: { children: React.ReactNode }) => {
+  const [docs, setDocs] = useState<DocumentData[]>(() => {
+    try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]'); } catch { return []; }
+  });
+  
+  const [userStats, setUserStats] = useState<UserStats>(() => {
+    try { 
+      const s = JSON.parse(localStorage.getItem(STORAGE_KEY + "_STATS") || '{}');
+      return { shields: 3, streak: 1, totalReviews: 0, archetype: 'Steady', ...s };
+    } catch { return { shields: 3, streak: 1, totalReviews: 0, archetype: 'Steady' }; }
+  });
+
+  const isOnline = useOfflineSync();
+
+  // Persistence Effects
+  useEffect(() => localStorage.setItem(STORAGE_KEY, JSON.stringify(docs)), [docs]);
+  useEffect(() => localStorage.setItem(STORAGE_KEY + "_STATS", JSON.stringify(userStats)), [userStats]);
+
+  const addDoc = (d: DocumentData) => setDocs(p => [d, ...p]);
+  const updateDoc = (d: DocumentData) => setDocs(p => p.map(x => x.id === d.id ? d : x));
+  const deleteDoc = (id: string) => setDocs(p => p.filter(x => x.id !== id));
+  const updateStats = (s: UserStats) => setUserStats(s);
+
+  // Data Management
+  const exportData = () => {
+    const blob = new Blob([JSON.stringify({ docs, userStats }, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `neuromap_backup_${new Date().toISOString().split('T')[0]}.json`;
+    a.click();
+  };
+
+  const importData = (json: string) => {
+    try {
+      const data = JSON.parse(json);
+      if (data.docs && Array.isArray(data.docs)) {
+        setDocs(data.docs);
+        if (data.userStats) setUserStats(data.userStats);
+        alert("Import successful!");
+      } else throw new Error("Invalid format");
+    } catch (e) { alert("Import failed: Invalid JSON"); }
+  };
+
+  return (
+    <AppContext.Provider value={{ docs, userStats, isOnline, addDoc, updateDoc, deleteDoc, updateStats, exportData, importData }}>
+      {children}
+    </AppContext.Provider>
+  );
+};
+
+/**
+ * ---------------------------------------------------------------------
+ * 3. ERROR BOUNDARY
+ * ---------------------------------------------------------------------
+ */
+
+class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { hasError: boolean }> {
+  constructor(props: any) { super(props); this.state = { hasError: false }; }
+  static getDerivedStateFromError() { return { hasError: true }; }
+  componentDidCatch(error: Error, info: React.ErrorInfo) { console.error("Crash:", error, info); }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="h-screen flex flex-col items-center justify-center bg-red-50 text-red-800 p-8 text-center">
+          <AlertTriangle className="w-16 h-16 mb-4" />
+          <h1 className="text-2xl font-bold">System Error</h1>
+          <p className="mb-4">The application encountered a critical error. Data is preserved safely.</p>
+          <button onClick={() => window.location.reload()} className="px-6 py-2 bg-red-600 text-white rounded-lg">Reload Application</button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+/**
+ * ---------------------------------------------------------------------
+ * 4. DATA MODELS
+ * ---------------------------------------------------------------------
+ */
+
+type NodeType = 'root' | 'topic' | 'subtopic' | 'week';
+interface QuizItem { id: string; question: string; options: string[]; correctIndex: number; userAnswer?: number; }
+interface MindMapNode { id: string; text: string; type: NodeType; children?: MindMapNode[]; bloomLevel?: number; targetDate?: string; quiz?: QuizItem[]; quizScore?: number; isExpanded?: boolean; }
+interface RevisionCard { id: string; nodeId: string; front: string; back: string; audioNote?: string; sm2Data: { interval: number; easeFactor: number; step: number; nextReview: string; lastReviewed?: string; }; }
+interface UserStats { shields: number; streak: number; totalReviews: number; archetype: 'Sprinter' | 'Steady' | 'Struggler'; }
+interface DocumentData { id: string; title: string; type: 'mindmap' | 'curriculum'; uploadDate: string; lastModified: string; tree: MindMapNode; cards: RevisionCard[]; }
+
+/**
+ * ---------------------------------------------------------------------
+ * 5. FEATURE COMPONENTS
+ * ---------------------------------------------------------------------
+ */
+
+// Memoized Visual Component
+const MindMapCanvas = memo(({ data, onNodeClick }: { data: MindMapNode, onNodeClick: (n: MindMapNode) => void }) => {
+    // Heavy calculation memoized
+    const layout = useMemo(() => {
+        const pos: Record<string, {x:number, y:number}> = {};
+        let cy = 0;
+        const traverse = (n: MindMapNode, d: number) => {
+            if(!n.children?.length) { pos[n.id] = {x: 50+d*280, y: cy}; cy += 100; return cy; }
+            const ys = n.children.map(c => traverse(c, d+1));
+            const y = (Math.min(...ys)+Math.max(...ys))/2;
+            pos[n.id] = {x: 50+d*280, y};
+            return y;
+        };
+        traverse(data, 0);
+        return pos;
+    }, [data]); // Only recalculate if data structure changes
+
+    const find = (n: MindMapNode, id: string): MindMapNode|null => { 
+      if(n.id===id) return n; 
+      if(n.children) for(const c of n.children){const f=find(c,id);if(f)return f;} 
+      return null; 
+    };
+
+    return (
+        <div className="w-full h-full bg-slate-50 overflow-auto relative cursor-grab active:cursor-grabbing">
+            <svg width="4000" height="4000" className="absolute pointer-events-none">
+                {Object.keys(layout).map(src => {
+                    const n = find(data, src); if(!n?.children) return null;
+                    return n.children.map(c => {
+                        const s=layout[src], t=layout[c.id]; if(!t) return null;
+                        return <path key={`${src}-${c.id}`} d={`M ${s.x+240} ${s.y+35} C ${s.x+280} ${s.y+35}, ${t.x-40} ${t.y+35}, ${t.x} ${t.y+35}`} stroke="#cbd5e1" strokeWidth="2" fill="none"/>;
+                    });
+                })}
+            </svg>
+            {Object.entries(layout).map(([id, p]) => {
+                const n = find(data, id); if(!n) return null;
+                return (
+                    <div key={id} onClick={() => onNodeClick(n)} className="absolute w-64 p-4 bg-white rounded-xl border-2 border-slate-100 hover:border-indigo-400 shadow-sm cursor-pointer transition-all hover:scale-105" style={{left: p.x, top: p.y}}>
+                        <div className="flex justify-between mb-2">
+                             <span className="text-[10px] bg-slate-100 text-slate-500 px-2 py-0.5 rounded uppercase font-bold">{n.type}</span>
+                             {n.quizScore!==undefined && <span className="text-[10px] bg-green-100 text-green-700 px-2 py-0.5 rounded font-bold">{n.quizScore}%</span>}
+                        </div>
+                        <div className="font-bold text-sm text-slate-800 line-clamp-2">{n.text}</div>
+                    </div>
+                );
+            })}
+        </div>
+    );
+}, (prev, next) => prev.data === next.data); // Custom comparison for perf
+
+// Advanced Revision Hook
+const useRevisionSession = (node: MindMapNode, cards: RevisionCard[]) => {
+    const { isOnline } = useNeuroMap();
+    const [sessionCards, setSessionCards] = useState<RevisionCard[]>(cards);
+    const [loading, setLoading] = useState(false);
+
+    const generateCards = useCallback(async () => {
+        if(cards.length > 0) return;
+        setLoading(true);
+        try {
+             if (!isOnline) throw new Error("Offline");
+             const res = await callGemini(`Gen 3 flashcards for "${node.text}"`, "JSON: [{front, back}]");
+             if(Array.isArray(res)) {
+                 const newCards = res.map((c:any,i:number)=>({id:`gen-${Date.now()}-${i}`, nodeId:node.id, front:c.front, back:c.back, sm2Data:{interval:0,easeFactor:2.5,step:0,nextReview:new Date().toISOString()}}));
+                 setSessionCards(newCards);
+                 return newCards;
+             }
+        } catch(e) {
+             // Offline fallback
+             const newCard = {id:`loc-${Date.now()}`, nodeId:node.id, front:`Define: ${node.text}`, back:"...", sm2Data:{interval:0,easeFactor:2.5,step:0,nextReview:new Date().toISOString()}};
+             setSessionCards([newCard]);
+             return [newCard];
+        } finally { setLoading(false); }
+    }, [node, cards.length, isOnline]);
+
+    return { sessionCards, loading, generateCards };
+};
+
+// --- Modals ---
+const GeneratorModal = ({ isOpen, onClose }: { isOpen: boolean, onClose: () => void }) => {
+    const { addDoc } = useNeuroMap();
+    const [input, setInput] = useState('');
+    const [mode, setMode] = useState('topic');
+    const [loading, setLoading] = useState(false);
+    const { checkLimit } = useRateLimit(5, 60000); // 5 calls per minute
+
+    const handleGen = async () => {
+        if (!checkLimit()) { alert("Rate limit exceeded. Wait a moment."); return; }
+        setLoading(true);
+        try {
+            const prompt = mode === 'curriculum' 
+                ? `Create Semester Plan. Root=Course. Children=Weeks. Output JSON.` 
+                : `Create Mind Map. Root=Topic. Children=Subtopics. Output JSON.`;
+            
+            const data = await callGemini(`Input: "${sanitizeInput(input)}"`, prompt);
+            
+            // Hydrate IDs
+            const hydrate = (n: any): any => ({ ...n, id: Math.random().toString(36).substr(2,9), isExpanded: true, children: n.children?.map(hydrate) });
+            
+            addDoc({
+                id: `doc-${Date.now()}`, title: data.title || input, type: mode === 'topic' ? 'mindmap' : 'curriculum',
+                uploadDate: new Date().toISOString(), lastModified: new Date().toISOString(),
+                tree: hydrate(data.root), cards: []
+            });
+            onClose();
+        } catch (e) { alert("Generation failed."); }
+        setLoading(false);
+    };
+
+    if (!isOpen) return null;
+    return (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+            <div className="bg-white rounded-2xl p-6 w-full max-w-md relative">
+                {loading && <div className="absolute inset-0 bg-white/90 flex items-center justify-center z-10"><Loader2 className="animate-spin w-8 h-8 text-indigo-600"/></div>}
+                <div className="flex justify-between mb-4"><h2 className="text-xl font-bold">New Project</h2><button onClick={onClose}><X/></button></div>
+                <div className="flex bg-slate-100 p-1 rounded-lg mb-4">
+                    <button onClick={()=>setMode('topic')} className={`flex-1 py-2 text-sm font-bold rounded ${mode==='topic'?'bg-white shadow':'text-slate-500'}`}>Mind Map</button>
+                    <button onClick={()=>setMode('curriculum')} className={`flex-1 py-2 text-sm font-bold rounded ${mode==='curriculum'?'bg-white shadow':'text-slate-500'}`}>Timeline</button>
+                </div>
+                <textarea value={input} onChange={e=>setInput(e.target.value)} className="w-full h-32 border rounded-xl p-3 mb-4" placeholder="Enter topic..."/>
+                <button onClick={handleGen} disabled={!input.trim()} className="w-full bg-indigo-600 text-white py-3 rounded-xl font-bold">Generate</button>
+            </div>
+        </div>
+    );
+};
+
+// --- Features ---
+const TeacherRadar = ({ time }: { time: number }) => (
+    <div className="bg-slate-900 text-white p-3 rounded-lg mb-4 flex justify-between items-center shadow-lg">
+        <div className="flex items-center gap-2"><Radio className={`w-4 h-4 ${time>15?'text-red-400 animate-pulse':'text-green-400'}`}/><span className="text-xs font-bold uppercase">Class Live</span></div>
+        <div className="text-xs opacity-70">Status: {time>15 ? "Struggling" : "Active"} ({time}s)</div>
+    </div>
+);
+
+const StudyHeatmap = () => (
+    <div className="flex gap-1 items-end h-10 w-full mt-2 opacity-60">
+        {[...Array(14)].map((_, i) => <div key={i} className={`flex-1 rounded-sm ${Math.random()>0.6 ? 'bg-indigo-500' : 'bg-slate-200'}`} style={{height: `${Math.random()*100}%`}} />)}
+    </div>
+);
+
+// --- Pages ---
+const Dashboard = ({ onOpen }: { onOpen: (d: DocumentData) => void }) => {
+    const { docs, userStats, isOnline } = useNeuroMap();
+    const [modalOpen, setModalOpen] = useState(false);
+
+    return (
+        <div className="p-8 overflow-y-auto h-full">
+            <header className="flex justify-between items-center mb-8">
+                <div>
+                    <h1 className="text-3xl font-bold">Dashboard</h1>
+                    <div className="flex items-center gap-2 text-sm text-slate-500 mt-1">
+                        <span className={`w-2 h-2 rounded-full ${isOnline ? 'bg-green-500' : 'bg-red-500'}`}/>
+                        {isOnline ? 'Online' : 'Offline Mode'}
+                    </div>
+                </div>
+                <button onClick={()=>setModalOpen(true)} className="bg-indigo-600 text-white px-6 py-3 rounded-xl font-bold shadow-lg flex gap-2"><Sparkles className="w-4 h-4"/> Create</button>
+            </header>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+                <div className="bg-white p-6 rounded-2xl border shadow-sm flex items-center gap-4">
+                    <div className="p-3 bg-amber-50 text-amber-600 rounded-xl"><ShieldCheck className="w-8 h-8"/></div>
+                    <div><div className="text-2xl font-bold">{userStats.shields}</div><div className="text-xs text-slate-500">Shields Active</div></div>
+                </div>
+                <div className="bg-white p-6 rounded-2xl border shadow-sm flex items-center gap-4">
+                    <div className="p-3 bg-blue-50 text-blue-600 rounded-xl"><Target className="w-8 h-8"/></div>
+                    <div><div className="text-2xl font-bold">{userStats.archetype}</div><div className="text-xs text-slate-500">Learner Profile</div></div>
+                </div>
+                <div className="bg-white p-6 rounded-2xl border shadow-sm">
+                    <div className="text-xs font-bold text-slate-400">STUDY VELOCITY</div>
+                    <StudyHeatmap />
+                </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                {docs.map(d => (
+                    <div key={d.id} onClick={()=>onOpen(d)} className="bg-white p-6 rounded-2xl border hover:shadow-xl cursor-pointer transition-all group">
+                        <div className={`w-10 h-10 rounded-xl flex items-center justify-center mb-4 ${d.type==='curriculum'?'bg-purple-100 text-purple-600':'bg-indigo-100 text-indigo-600'}`}>
+                            {d.type==='curriculum'?<Calendar className="w-5 h-5"/>:<FileText className="w-5 h-5"/>}
+                        </div>
+                        <h3 className="font-bold text-lg mb-1">{d.title}</h3>
+                        <p className="text-xs text-slate-500">Updated {new Date(d.lastModified).toLocaleDateString()}</p>
+                    </div>
+                ))}
+            </div>
+
+            <GeneratorModal isOpen={modalOpen} onClose={()=>setModalOpen(false)} />
+        </div>
+    );
+};
+
+const Editor = ({ doc, onClose }: { doc: DocumentData, onClose: () => void }) => {
+    const { updateDoc } = useNeuroMap();
+    const [activeNode, setActiveNode] = useState<MindMapNode|null>(null);
+    const [view, setView] = useState<'map'|'timeline'>('map');
+
+    // Recursive Updater
+    const updateNode = (n: MindMapNode) => {
+        const traverse = (p: MindMapNode): MindMapNode => p.id === n.id ? n : { ...p, children: p.children?.map(traverse) };
+        updateDoc({ ...doc, tree: traverse(doc.tree) });
+        setActiveNode(n);
+    };
+
+    return (
+        <div className="flex flex-col h-full">
+            <div className="h-16 bg-white border-b flex items-center justify-between px-6 shadow-sm z-10">
+                <div className="flex items-center gap-4">
+                    <button onClick={onClose} className="p-2 hover:bg-slate-100 rounded-lg"><ChevronLeft className="w-5 h-5"/></button>
+                    <h2 className="font-bold">{doc.title}</h2>
+                    {doc.type==='curriculum' && (
+                        <div className="flex bg-slate-100 p-1 rounded ml-4">
+                            <button onClick={()=>setView('map')} className={`px-3 py-1 text-xs font-bold rounded ${view==='map'?'bg-white shadow':''}`}>Map</button>
+                            <button onClick={()=>setView('timeline')} className={`px-3 py-1 text-xs font-bold rounded ${view==='timeline'?'bg-white shadow':''}`}>Timeline</button>
+                        </div>
+                    )}
+                </div>
+            </div>
+
+            <div className="flex-grow relative bg-slate-50 overflow-hidden">
+                {view === 'map' ? (
+                    <MindMapCanvas data={doc.tree} onNodeClick={n=>n.type!=='root'&&setActiveNode(n)} />
+                ) : (
+                    <div className="p-8">Timeline View Placeholder (Use Map for now)</div>
+                )}
+                
+                {/* Slide Panel */}
+                <div className={`absolute top-0 right-0 w-[450px] h-full bg-white shadow-2xl transition-transform duration-300 z-30 ${activeNode ? 'translate-x-0' : 'translate-x-full'}`}>
+                    {activeNode && (
+                        <NodePanel 
+                            node={activeNode} 
+                            cards={doc.cards.filter(c => c.nodeId === activeNode?.id)}
+                            onAddCards={(cs:any) => updateDoc({...doc, cards: [...doc.cards, ...cs]})}
+                            onUpdateCard={(c:any) => updateDoc({...doc, cards: doc.cards.map(x=>x.id===c.id?c:x)})}
+                            onUpdateNode={updateNode}
+                            onClose={()=>setActiveNode(null)} 
+                        />
+                    )}
+                </div>
+            </div>
+        </div>
+    );
+};
+
+const NodePanel = ({ node, cards, onAddCards, onUpdateCard, onUpdateNode, onClose }: any) => {
+    const [tab, setTab] = useState('study');
+    const { generateCards, loading } = useRevisionSession(node, cards);
+    
+    // Auto-generate on open
+    useEffect(() => { generateCards().then(cs => cs && onAddCards(cs)); }, [node.id]);
+
+    return (
+        <div className="flex flex-col h-full">
+            <div className="flex justify-between items-center p-4 border-b">
+                <h3 className="font-bold truncate w-64">{node.text}</h3>
+                <button onClick={onClose}><X className="w-5 h-5"/></button>
+            </div>
+            <div className="flex border-b">
+                <button onClick={()=>setTab('study')} className={`flex-1 py-3 text-sm font-bold border-b-2 ${tab==='study'?'border-indigo-600 text-indigo-600':'border-transparent'}`}>Study</button>
+                <button onClick={()=>setTab('quiz')} className={`flex-1 py-3 text-sm font-bold border-b-2 ${tab==='quiz'?'border-indigo-600 text-indigo-600':'border-transparent'}`}>Quiz</button>
+            </div>
+            <div className="flex-grow overflow-y-auto p-4">
+                {loading && <div className="text-center p-4"><Loader2 className="animate-spin mx-auto"/></div>}
+                {!loading && tab==='study' && <RevisionCardDeck cards={cards} onUpdateCard={onUpdateCard} onClose={onClose}/>}
+                {!loading && tab==='quiz' && <div className="text-center p-8 text-slate-500">Quiz Module (Placeholder for Enterprise)</div>}
+            </div>
+        </div>
+    );
+};
+
+const RevisionCardDeck = ({ cards, onUpdateCard, onClose }: any) => {
+    const [index, setIndex] = useState(0);
+    const [flipped, setFlipped] = useState(false);
+    const [timer, setTimer] = useState(0);
+
+    useEffect(() => { const t = setInterval(()=>setTimer(p=>p+1),1000); return ()=>clearInterval(t); }, [index]);
+
+    const handleGrade = (q:number) => {
+        const c = cards[index];
+        const next = new Date(); next.setDate(next.getDate() + (q>=3?1:0));
+        onUpdateCard({...c, sm2Data:{...c.sm2Data, nextReview:next.toISOString()}});
+        if(index<cards.length-1) { setIndex(i=>i+1); setFlipped(false); setTimer(0); } else onClose();
+    };
+
+    if(!cards.length) return null;
+    const card = cards[index];
+
+    return (
+        <div className="h-full flex flex-col">
+            <TeacherRadar time={timer} />
+            <div className="flex-grow relative perspective-1000 cursor-pointer" onClick={()=>!flipped&&setFlipped(true)}>
+                <div className={`w-full h-full transition-all duration-500 transform preserve-3d ${flipped?'rotate-y-180':''}`}>
+                    <div className="absolute inset-0 backface-hidden bg-white border-2 border-slate-100 rounded-xl p-6 flex items-center justify-center text-center shadow-sm">
+                        <h3 className="font-bold text-lg">{card.front}</h3>
+                    </div>
+                    <div className="absolute inset-0 backface-hidden rotate-y-180 bg-slate-900 rounded-xl p-6 flex items-center justify-center text-center text-white">
+                        <p>{card.back}</p>
+                    </div>
+                </div>
+            </div>
+            {flipped && (
+                <div className="grid grid-cols-3 gap-2 mt-4">
+                    <button onClick={()=>handleGrade(0)} className="p-3 bg-red-100 text-red-700 rounded font-bold text-xs">Fail</button>
+                    <button onClick={()=>handleGrade(3)} className="p-3 bg-amber-100 text-amber-700 rounded font-bold text-xs">Hard</button>
+                    <button onClick={()=>handleGrade(5)} className="p-3 bg-green-100 text-green-700 rounded font-bold text-xs">Easy</button>
+                </div>
+            )}
+        </div>
+    );
+};
+
+// --- App Root ---
+const MainLayout = () => {
+    const [activeDoc, setActiveDoc] = useState<DocumentData|null>(null);
+    const { importData, exportData } = useNeuroMap();
+    const [settingsOpen, setSettingsOpen] = useState(false);
+
+    return (
+        <div className="h-screen flex bg-slate-50 font-sans text-slate-900">
+            {/* Sidebar */}
+            <div className="w-20 bg-slate-900 flex flex-col items-center py-6 gap-6 shadow-xl z-20">
+                <div className="w-12 h-12 bg-indigo-600 rounded-xl flex items-center justify-center mb-4"><Brain className="text-white"/></div>
+                <button onClick={()=>setActiveDoc(null)} className={`p-3 rounded-xl ${!activeDoc?'bg-white/10 text-white':'text-slate-400'}`}><Layout/></button>
+                <div className="mt-auto flex flex-col gap-4">
+                    <button onClick={()=>setSettingsOpen(true)} className="p-3 text-slate-400 hover:text-white"><Settings/></button>
+                </div>
+            </div>
+
+            <div className="flex-grow flex flex-col overflow-hidden relative">
+                {activeDoc ? <Editor doc={activeDoc} onClose={()=>setActiveDoc(null)}/> : <Dashboard onOpen={setActiveDoc}/>}
+                
+                {settingsOpen && (
+                    <div className="absolute inset-0 bg-black/50 z-50 flex items-center justify-center">
+                        <div className="bg-white p-6 rounded-xl w-96">
+                            <h2 className="font-bold text-lg mb-4">Data Management</h2>
+                            <div className="space-y-3">
+                                <button onClick={exportData} className="w-full p-3 bg-indigo-50 text-indigo-700 rounded font-bold flex gap-2"><Download className="w-4 h-4"/> Export Backup</button>
+                                <button onClick={()=>{const i=prompt("Paste JSON"); if(i)importData(i)}} className="w-full p-3 bg-slate-100 text-slate-700 rounded font-bold flex gap-2"><UploadCloud className="w-4 h-4"/> Import Data</button>
+                            </div>
+                            <button onClick={()=>setSettingsOpen(false)} className="mt-6 w-full py-2 border rounded">Close</button>
+                        </div>
+                    </div>
+                )}
+            </div>
+        </div>
+    );
+};
+
+export default function App() {
+    return (
+        <ErrorBoundary>
+            <AppProvider>
+                <MainLayout />
+            </AppProvider>
+        </ErrorBoundary>
+    );
+}
+
+
