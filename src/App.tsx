@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useRef, useMemo, memo, createContext, useContext } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { 
-  Brain, Layout, ChevronRight, ChevronLeft, ZoomIn, ZoomOut, Maximize, X, 
-  Clock, Settings, Share2, AlertTriangle, Zap, Award, Loader2, Sparkles, 
-  MessageSquare, Trophy, Save, Trash2, ShieldCheck, Mic, Play, Square, 
-  Calendar, GraduationCap, Mail, Radio, Target, Menu, FileText, CheckCircle2, XCircle, ArrowRight
+  Brain, Layout, ChevronRight, ChevronLeft, X,
+  Clock, Zap, Award, Loader2, Sparkles, Activity,
+  ShieldCheck, Mic, Play, Square,
+  Calendar, GraduationCap, Mail, Radio, Target, FileText, CheckCircle2, XCircle, ArrowRight
 } from 'lucide-react';
 
 /**
@@ -143,17 +144,7 @@ const LandingPage = ({ onEnter }: { onEnter: () => void }) => {
 
 const apiKey = ""; // Injected by runtime environment (e.g. import.meta.env.VITE_GEMINI_API_KEY)
 const STORAGE_KEY = "NEUROMAP_FINAL_DATA";
-
-// --- Resilience Utils ---
-const useOnlineStatus = () => {
-  const [isOnline, setIsOnline] = useState(navigator.onLine);
-  useEffect(() => {
-    const h = () => setIsOnline(navigator.onLine);
-    window.addEventListener('online', h); window.addEventListener('offline', h);
-    return () => { window.removeEventListener('online', h); window.removeEventListener('offline', h); };
-  }, []);
-  return isOnline;
-};
+const SERVER_STORAGE_KEY = `${STORAGE_KEY}_SERVER`;
 
 // --- Toast Context ---
 interface Toast { id: string; type: 'success' | 'error'; message: string; }
@@ -225,6 +216,45 @@ interface UserStats { shields: number; streak: number; totalReviews: number; arc
 const ONBOARDING_DOC: DocumentData = {
     id: 'doc-demo', title: 'Demo Project', type: 'mindmap', uploadDate: new Date().toISOString(), lastModified: new Date().toISOString(),
     tree: { id: 'root', type: 'root', text: 'Central Topic', isExpanded: true, children: [{ id: '1', type: 'topic', text: 'Click Me for Tools', isExpanded: true }] }, cards: []
+};
+
+const simulateLatency = async <T,>(payload: T, delay = 450) => new Promise<T>(resolve => setTimeout(() => resolve(payload), delay));
+
+const loadServerDocuments = (): DocumentData[] => {
+  const stored = localStorage.getItem(SERVER_STORAGE_KEY) ?? localStorage.getItem(STORAGE_KEY);
+  if (stored) {
+    try {
+      const parsed = JSON.parse(stored) as DocumentData[];
+      return parsed.length ? parsed : [ONBOARDING_DOC];
+    } catch (error) {
+      console.error('Failed to parse stored docs', error);
+    }
+  }
+  return [ONBOARDING_DOC];
+};
+
+const persistServerDocuments = async (docs: DocumentData[]) => {
+  localStorage.setItem(SERVER_STORAGE_KEY, JSON.stringify(docs));
+  return simulateLatency(docs, 300);
+};
+
+const fetchDocuments = async (): Promise<DocumentData[]> => {
+  const docs = loadServerDocuments();
+  return persistServerDocuments(docs);
+};
+
+const createDocumentOnServer = async (doc: DocumentData) => {
+  const docs = loadServerDocuments();
+  const nextDocs = [doc, ...docs];
+  await persistServerDocuments(nextDocs);
+  return simulateLatency(doc, 400);
+};
+
+const updateDocumentOnServer = async (doc: DocumentData) => {
+  const docs = loadServerDocuments();
+  const nextDocs = docs.map(d => d.id === doc.id ? doc : d);
+  await persistServerDocuments(nextDocs);
+  return simulateLatency(doc, 350);
 };
 
 // --- Tool Components ---
@@ -384,10 +414,10 @@ const MindMapCanvas = memo(({ data, onNodeClick }: { data: MindMapNode, onNodeCl
     const layout = useMemo(() => {
         const pos: Record<string, {x:number, y:number}> = {};
         let cy = 0;
-        const traverse = (n: MindMapNode, d: number) => {
+        const traverse = (n: MindMapNode, d: number): number => {
             if(!n.children?.length) { pos[n.id] = {x: 50+d*280, y: cy}; cy += 100; return cy; }
-            const ys = n.children.map(c => traverse(c, d+1));
-            const y = (Math.min(...ys)+Math.max(...ys))/2;
+            const ys: number[] = n.children.map(c => traverse(c, d+1));
+            const y: number = (Math.min(...ys)+Math.max(...ys))/2;
             pos[n.id] = {x: 50+d*280, y};
             return y;
         };
@@ -484,7 +514,7 @@ const GeneratorModal = ({ isOpen, onClose, onComplete }: any) => {
                 : `Create Mind Map. Root=Topic. Children=Subtopics.`;
             const data = await callGemini(`Input: "${input}"`, `${prompt} Output JSON: { "title": "...", "root": { "text": "...", "children": [] } }`);
             const hydrate = (n: any): any => ({ ...n, id: Math.random().toString(36).substr(2,9), isExpanded: true, children: n.children?.map(hydrate) });
-            onComplete({ id: `doc-${Date.now()}`, title: data.title || input, type: mode==='topic'?'mindmap':'curriculum', uploadDate: new Date().toISOString(), lastModified: new Date().toISOString(), cards: [], tree: hydrate(data.root) });
+            await onComplete({ id: `doc-${Date.now()}`, title: data.title || input, type: mode==='topic'?'mindmap':'curriculum', uploadDate: new Date().toISOString(), lastModified: new Date().toISOString(), cards: [], tree: hydrate(data.root) });
             addToast({type:'success', message:'Project Generated'});
         } catch(e) { addToast({type:'error', message:'Gen Failed'}); }
         setLoading(false);
@@ -508,104 +538,183 @@ const GeneratorModal = ({ isOpen, onClose, onComplete }: any) => {
 };
 
 // --- APP CONTROLLER ---
-export default function NeuroMapApp() {
-    const [view, setView] = useState<'landing' | 'app'>('landing');
-    const [docs, setDocs] = useState<DocumentData[]>(() => { try{ return JSON.parse(localStorage.getItem(STORAGE_KEY)||'[]'); }catch(e){return [];} });
-    const [userStats, setUserStats] = useState<UserStats>({ shields: 5, streak: 3, totalReviews: 142, archetype: 'Sprinter' });
-    const [currentDoc, setCurrentDoc] = useState<DocumentData | null>(null);
+const AppContent = () => {
+    const queryClient = useQueryClient();
+    const { addToast } = useToast();
+    const [userStats] = useState<UserStats>({ shields: 5, streak: 3, totalReviews: 142, archetype: 'Sprinter' });
+    const [currentDocId, setCurrentDocId] = useState<string | null>(null);
     const [activeNode, setActiveNode] = useState<MindMapNode | null>(null);
     const [docView, setDocView] = useState<'map' | 'timeline'>('map');
     const [modal, setModal] = useState<'gen' | 'digest' | null>(null);
 
-    useEffect(() => localStorage.setItem(STORAGE_KEY, JSON.stringify(docs)), [docs]);
-    const updateDoc = (d: DocumentData) => { setCurrentDoc(d); setDocs(prev => prev.map(x => x.id === d.id ? d : x)); };
+    const { data: docs = [], isLoading: docsLoading, isError: docsError, error: docsErrorObj, refetch } = useQuery<DocumentData[], Error>({
+        queryKey: ['documents'],
+        queryFn: fetchDocuments,
+    });
 
-    if (view === 'landing') return <LandingPage onEnter={() => setView('app')} />;
+    useEffect(() => {
+        if (!currentDocId && docs.length) {
+            setCurrentDocId(docs[0].id);
+        }
+    }, [docs, currentDocId]);
+
+    const currentDoc = useMemo(() => docs.find(d => d.id === currentDocId) || null, [docs, currentDocId]);
+
+    const updateDocMutation = useMutation<DocumentData, Error, DocumentData>({
+        mutationFn: updateDocumentOnServer,
+        onSuccess: (doc) => {
+            queryClient.invalidateQueries({ queryKey: ['documents'] });
+            setCurrentDocId(doc.id);
+        },
+        onError: () => addToast({ type: 'error', message: 'Failed to save changes' }),
+    });
+
+    const createDocMutation = useMutation<DocumentData, Error, DocumentData>({
+        mutationFn: createDocumentOnServer,
+        onSuccess: (doc) => {
+            queryClient.invalidateQueries({ queryKey: ['documents'] });
+            setCurrentDocId(doc.id);
+            addToast({ type: 'success', message: 'Project created' });
+        },
+        onError: () => addToast({ type: 'error', message: 'Unable to create project' }),
+    });
+
+    const handleUpdateDoc = (doc: DocumentData) => {
+        const nextDoc = { ...doc, lastModified: new Date().toISOString() };
+        queryClient.setQueryData<DocumentData[]>(['documents'], (prev) => {
+            const existing = prev ?? [];
+            return existing.map(d => d.id === nextDoc.id ? nextDoc : d);
+        });
+        updateDocMutation.mutate(nextDoc);
+    };
+
+    const handleCreateDoc = async (doc: DocumentData) => {
+        const nextDoc = { ...doc, lastModified: new Date().toISOString() };
+        queryClient.setQueryData<DocumentData[]>(['documents'], (prev) => {
+            const existing = prev ?? [];
+            return [nextDoc, ...existing];
+        });
+        await createDocMutation.mutateAsync(nextDoc);
+        setModal(null);
+    };
+
+    const handleSelectDoc = (doc: DocumentData | null) => {
+        setCurrentDocId(doc?.id || null);
+        setActiveNode(null);
+    };
+
+    return (
+        <div className="h-screen flex bg-slate-50 font-sans text-slate-900">
+            {/* Sidebar */}
+            <div className="w-20 bg-slate-900 flex flex-col items-center py-6 gap-6 shadow-xl z-20">
+                <div className="w-12 h-12 bg-indigo-600 rounded-xl flex items-center justify-center mb-4"><Brain className="text-white w-7 h-7" /></div>
+                <button onClick={() => handleSelectDoc(null)} className={`p-3 rounded-xl ${!currentDoc ? 'bg-white/10 text-white' : 'text-slate-400 hover:text-white'}`}><Layout/></button>
+                <button onClick={() => setModal('digest')} className="p-3 text-slate-400 hover:text-white mt-auto" title="Parent Digest"><Mail/></button>
+            </div>
+
+            {/* Main Content */}
+            <div className="flex-grow flex flex-col h-full overflow-hidden">
+                {!currentDoc ? (
+                    <div className="p-10 overflow-y-auto">
+                        <header className="flex justify-between items-center mb-10">
+                            <div><h1 className="text-4xl font-bold">Dashboard</h1><p className="text-slate-500">NeuroMap AI v4.0</p></div>
+                            <button onClick={() => setModal('gen')} className="bg-indigo-600 text-white px-8 py-4 rounded-2xl shadow-xl font-bold flex gap-3 hover:scale-105 transition-transform"><Sparkles/> New Project</button>
+                        </header>
+
+                        <div className="grid grid-cols-3 gap-6 mb-10">
+                            <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 flex items-center gap-4">
+                                <div className="p-3 bg-amber-50 text-amber-600 rounded-xl"><ShieldCheck className="w-8 h-8"/></div>
+                                <div><div className="text-2xl font-bold">{userStats.shields} Shields</div><div className="text-xs text-slate-500">Streak Protection</div></div>
+                            </div>
+                            <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 flex items-center gap-4">
+                                <div className="p-3 bg-blue-50 text-blue-600 rounded-xl"><Target className="w-8 h-8"/></div>
+                                <div><div className="text-2xl font-bold">{userStats.archetype}</div><div className="text-xs text-slate-500">Learning Style</div></div>
+                            </div>
+                            <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 flex items-center gap-4">
+                                <div className="p-3 bg-purple-50 text-purple-600 rounded-xl"><Activity className="w-8 h-8"/></div>
+                                <div><div className="text-2xl font-bold">{userStats.totalReviews}</div><div className="text-xs text-slate-500">Total Reviews</div></div>
+                            </div>
+                        </div>
+
+                        {docsLoading && (
+                            <div className="flex items-center gap-3 bg-white p-6 rounded-2xl border border-slate-100 shadow-sm mb-6">
+                                <Loader2 className="w-5 h-5 animate-spin text-indigo-600" />
+                                <span className="text-sm font-bold text-slate-600">Fetching projects...</span>
+                            </div>
+                        )}
+
+                        {docsError && (
+                            <div className="bg-red-50 border border-red-100 text-red-700 p-4 rounded-2xl mb-6 flex items-center justify-between">
+                                <div>
+                                    <p className="font-bold">Unable to load projects</p>
+                                    <p className="text-sm">{docsErrorObj?.message || 'Unknown error'}</p>
+                                </div>
+                                <button onClick={() => refetch()} className="px-4 py-2 bg-red-600 text-white rounded-lg font-bold">Retry</button>
+                            </div>
+                        )}
+
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                            {docs.map(d => (
+                                <div key={d.id} onClick={() => handleSelectDoc(d)} className="bg-white p-8 rounded-3xl border border-slate-100 hover:shadow-xl cursor-pointer hover:border-indigo-100 transition-all group">
+                                    <div className={`w-12 h-12 rounded-2xl flex items-center justify-center mb-6 ${d.type==='curriculum'?'bg-purple-50 text-purple-600':'bg-indigo-50 text-indigo-600'}`}>{d.type==='curriculum'?<Calendar/>:<FileText/>}</div>
+                                    <h3 className="text-xl font-bold mb-2">{d.title}</h3>
+                                    <p className="text-slate-500 text-sm">Edited {new Date(d.lastModified).toLocaleDateString()}</p>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                ) : (
+                    <div className="flex flex-col h-full">
+                        <div className="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-6 shadow-sm z-10">
+                            <div className="flex items-center gap-4">
+                                <button onClick={() => handleSelectDoc(null)} className="p-2 hover:bg-slate-100 rounded-lg"><ChevronLeft/></button>
+                                <h2 className="font-bold">{currentDoc.title}</h2>
+                                {currentDoc.type === 'curriculum' && (
+                                    <div className="flex bg-slate-100 p-1 rounded-lg ml-4">
+                                        <button onClick={() => setDocView('map')} className={`px-3 py-1 text-xs font-bold rounded ${docView==='map'?'bg-white shadow':'text-slate-500'}`}>Map</button>
+                                        <button onClick={() => setDocView('timeline')} className={`px-3 py-1 text-xs font-bold rounded ${docView==='timeline'?'bg-white shadow':'text-slate-500'}`}>Timeline</button>
+                                    </div>
+                                )}
+                            </div>
+                            {(docsLoading || updateDocMutation.isLoading) && (
+                                <div className="flex items-center gap-2 text-xs text-slate-500"><Loader2 className="w-4 h-4 animate-spin" /> Syncing…</div>
+                            )}
+                        </div>
+                        <div className="flex-grow relative bg-slate-50 overflow-hidden">
+                            {docView === 'map' ? <MindMapCanvas data={currentDoc.tree} onNodeClick={n=>n.type!=='root'&&setActiveNode(n)}/>
+                            : <TimelineView data={currentDoc.tree} onNodeClick={n=>n.type!=='root'&&setActiveNode(n)}/>}
+
+                            <div className={`absolute top-0 right-0 w-[480px] h-full bg-white shadow-2xl transition-transform duration-300 z-30 ${activeNode ? 'translate-x-0' : 'translate-x-full'}`}>
+                                {activeNode && (
+                                    <NodeDetailPanel
+                                        node={activeNode}
+                                        cards={currentDoc.cards.filter(c => c.nodeId === activeNode?.id)}
+                                        onAddCards={(cs:any) => handleUpdateDoc({...currentDoc, cards: [...currentDoc.cards, ...cs]})}
+                                        onUpdateCard={(c:any) => handleUpdateDoc({...currentDoc, cards: currentDoc.cards.map(x=>x.id===c.id?c:x)})}
+                                        onUpdateNode={(n:any) => {
+                                            const traverse=(p:MindMapNode):MindMapNode=>p.id===n.id?n:{...p,children:p.children?.map(traverse)};
+                                            handleUpdateDoc({...currentDoc, tree: traverse(currentDoc.tree)}); setActiveNode(n);
+                                        }}
+                                        onClose={() => setActiveNode(null)}
+                                    />
+                                )}
+                            </div>
+                        </div>
+                    </div>
+                )}
+            </div>
+
+            <GeneratorModal isOpen={modal === 'gen'} onClose={() => setModal(null)} onComplete={(d:any) => handleCreateDoc(d)} />
+        </div>
+    );
+};
+
+export default function NeuroMapApp() {
+    const [view, setView] = useState<'landing' | 'app'>('landing');
 
     return (
         <ToastProvider>
-            <div className="h-screen flex bg-slate-50 font-sans text-slate-900">
-                {/* Sidebar */}
-                <div className="w-20 bg-slate-900 flex flex-col items-center py-6 gap-6 shadow-xl z-20">
-                    <div className="w-12 h-12 bg-indigo-600 rounded-xl flex items-center justify-center mb-4"><Brain className="text-white w-7 h-7" /></div>
-                    <button onClick={() => setCurrentDoc(null)} className={`p-3 rounded-xl ${!currentDoc ? 'bg-white/10 text-white' : 'text-slate-400 hover:text-white'}`}><Layout/></button>
-                    <button onClick={() => setModal('digest')} className="p-3 text-slate-400 hover:text-white mt-auto" title="Parent Digest"><Mail/></button>
-                </div>
-
-                {/* Main Content */}
-                <div className="flex-grow flex flex-col h-full overflow-hidden">
-                    {!currentDoc ? (
-                        <div className="p-10 overflow-y-auto">
-                            <header className="flex justify-between items-center mb-10">
-                                <div><h1 className="text-4xl font-bold">Dashboard</h1><p className="text-slate-500">NeuroMap AI v4.0</p></div>
-                                <button onClick={() => setModal('gen')} className="bg-indigo-600 text-white px-8 py-4 rounded-2xl shadow-xl font-bold flex gap-3 hover:scale-105 transition-transform"><Sparkles/> New Project</button>
-                            </header>
-
-                            <div className="grid grid-cols-3 gap-6 mb-10">
-                                <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 flex items-center gap-4">
-                                    <div className="p-3 bg-amber-50 text-amber-600 rounded-xl"><ShieldCheck className="w-8 h-8"/></div>
-                                    <div><div className="text-2xl font-bold">{userStats.shields} Shields</div><div className="text-xs text-slate-500">Streak Protection</div></div>
-                                </div>
-                                <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 flex items-center gap-4">
-                                    <div className="p-3 bg-blue-50 text-blue-600 rounded-xl"><Target className="w-8 h-8"/></div>
-                                    <div><div className="text-2xl font-bold">{userStats.archetype}</div><div className="text-xs text-slate-500">Learning Style</div></div>
-                                </div>
-                                <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 flex items-center gap-4">
-                                    <div className="p-3 bg-purple-50 text-purple-600 rounded-xl"><Activity className="w-8 h-8"/></div>
-                                    <div><div className="text-2xl font-bold">{userStats.totalReviews}</div><div className="text-xs text-slate-500">Total Reviews</div></div>
-                                </div>
-                            </div>
-
-                            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                                {docs.map(d => (
-                                    <div key={d.id} onClick={() => setCurrentDoc(d)} className="bg-white p-8 rounded-3xl border border-slate-100 hover:shadow-xl cursor-pointer hover:border-indigo-100 transition-all group">
-                                        <div className={`w-12 h-12 rounded-2xl flex items-center justify-center mb-6 ${d.type==='curriculum'?'bg-purple-50 text-purple-600':'bg-indigo-50 text-indigo-600'}`}>{d.type==='curriculum'?<Calendar/>:<FileText/>}</div>
-                                        <h3 className="text-xl font-bold mb-2">{d.title}</h3>
-                                        <p className="text-slate-500 text-sm">Edited {new Date(d.lastModified).toLocaleDateString()}</p>
-                                    </div>
-                                ))}
-                            </div>
-                        </div>
-                    ) : (
-                        <div className="flex flex-col h-full">
-                            <div className="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-6 shadow-sm z-10">
-                                <div className="flex items-center gap-4">
-                                    <button onClick={() => setCurrentDoc(null)} className="p-2 hover:bg-slate-100 rounded-lg"><ChevronLeft/></button>
-                                    <h2 className="font-bold">{currentDoc.title}</h2>
-                                    {currentDoc.type === 'curriculum' && (
-                                        <div className="flex bg-slate-100 p-1 rounded-lg ml-4">
-                                            <button onClick={() => setDocView('map')} className={`px-3 py-1 text-xs font-bold rounded ${docView==='map'?'bg-white shadow':'text-slate-500'}`}>Map</button>
-                                            <button onClick={() => setDocView('timeline')} className={`px-3 py-1 text-xs font-bold rounded ${docView==='timeline'?'bg-white shadow':'text-slate-500'}`}>Timeline</button>
-                                        </div>
-                                    )}
-                                </div>
-                            </div>
-                            <div className="flex-grow relative bg-slate-50 overflow-hidden">
-                                {docView === 'map' ? <MindMapCanvas data={currentDoc.tree} onNodeClick={n=>n.type!=='root'&&setActiveNode(n)}/> 
-                                : <TimelineView data={currentDoc.tree} onNodeClick={n=>n.type!=='root'&&setActiveNode(n)}/>}
-                                
-                                <div className={`absolute top-0 right-0 w-[480px] h-full bg-white shadow-2xl transition-transform duration-300 z-30 ${activeNode ? 'translate-x-0' : 'translate-x-full'}`}>
-                                    {activeNode && (
-                                        <NodeDetailPanel 
-                                            node={activeNode} 
-                                            cards={currentDoc.cards.filter(c => c.nodeId === activeNode?.id)}
-                                            onAddCards={(cs:any) => updateDoc({...currentDoc, cards: [...currentDoc.cards, ...cs]})}
-                                            onUpdateCard={(c:any) => updateDoc({...currentDoc, cards: currentDoc.cards.map(x=>x.id===c.id?c:x)})}
-                                            onUpdateNode={(n:any) => {
-                                                const traverse=(p:MindMapNode):MindMapNode=>p.id===n.id?n:{...p,children:p.children?.map(traverse)};
-                                                updateDoc({...currentDoc, tree: traverse(currentDoc.tree)}); setActiveNode(n);
-                                            }}
-                                            onClose={() => setActiveNode(null)}
-                                        />
-                                    )}
-                                </div>
-                            </div>
-                        </div>
-                    )}
-                </div>
-
-                <GeneratorModal isOpen={modal === 'gen'} onClose={() => setModal(null)} onComplete={(d:any) => { setDocs([d, ...docs]); setCurrentDoc(d); setModal(null); }} />
-            </div>
+            {view === 'landing' ? <LandingPage onEnter={() => setView('app')} /> : <AppContent />}
         </ToastProvider>
     );
 }
