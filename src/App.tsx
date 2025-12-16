@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useRef, useMemo, memo, createContext, useContext } from 'react';
-import { 
-  Brain, Layout, ChevronRight, ChevronLeft, ZoomIn, ZoomOut, Maximize, X, 
-  Clock, Settings, Share2, AlertTriangle, Zap, Award, Loader2, Sparkles, 
-  MessageSquare, Trophy, Save, Trash2, ShieldCheck, Mic, Play, Square, 
-  Calendar, GraduationCap, Mail, Radio, Target, Menu, FileText, CheckCircle2, XCircle, ArrowRight
+import {
+  Brain, Layout, ChevronRight, ChevronLeft, X,
+  Clock, Zap, Award, Loader2, Sparkles,
+  ShieldCheck, Mic, Play, Square,
+  Calendar, GraduationCap, Mail, Radio, Target, FileText, CheckCircle2, XCircle, ArrowRight, Activity
 } from 'lucide-react';
 
 /**
@@ -144,17 +144,6 @@ const LandingPage = ({ onEnter }: { onEnter: () => void }) => {
 const apiKey = ""; // Injected by runtime environment (e.g. import.meta.env.VITE_GEMINI_API_KEY)
 const STORAGE_KEY = "NEUROMAP_FINAL_DATA";
 
-// --- Resilience Utils ---
-const useOnlineStatus = () => {
-  const [isOnline, setIsOnline] = useState(navigator.onLine);
-  useEffect(() => {
-    const h = () => setIsOnline(navigator.onLine);
-    window.addEventListener('online', h); window.addEventListener('offline', h);
-    return () => { window.removeEventListener('online', h); window.removeEventListener('offline', h); };
-  }, []);
-  return isOnline;
-};
-
 // --- Toast Context ---
 interface Toast { id: string; type: 'success' | 'error'; message: string; }
 const ToastContext = createContext<{ addToast: (t: Omit<Toast, 'id'>) => void }>({ addToast: () => {} });
@@ -221,11 +210,6 @@ interface DocumentData {
   uploadDate: string; lastModified: string; tree: MindMapNode; cards: RevisionCard[];
 }
 interface UserStats { shields: number; streak: number; totalReviews: number; archetype: 'Sprinter' | 'Steady' | 'Struggler'; }
-
-const ONBOARDING_DOC: DocumentData = {
-    id: 'doc-demo', title: 'Demo Project', type: 'mindmap', uploadDate: new Date().toISOString(), lastModified: new Date().toISOString(),
-    tree: { id: 'root', type: 'root', text: 'Central Topic', isExpanded: true, children: [{ id: '1', type: 'topic', text: 'Click Me for Tools', isExpanded: true }] }, cards: []
-};
 
 // --- Tool Components ---
 
@@ -384,10 +368,10 @@ const MindMapCanvas = memo(({ data, onNodeClick }: { data: MindMapNode, onNodeCl
     const layout = useMemo(() => {
         const pos: Record<string, {x:number, y:number}> = {};
         let cy = 0;
-        const traverse = (n: MindMapNode, d: number) => {
+        const traverse = (n: MindMapNode, d: number): number => {
             if(!n.children?.length) { pos[n.id] = {x: 50+d*280, y: cy}; cy += 100; return cy; }
-            const ys = n.children.map(c => traverse(c, d+1));
-            const y = (Math.min(...ys)+Math.max(...ys))/2;
+            const ys: number[] = n.children.map(c => traverse(c, d+1));
+            const y: number = (Math.min(...ys)+Math.max(...ys))/2;
             pos[n.id] = {x: 50+d*280, y};
             return y;
         };
@@ -511,7 +495,7 @@ const GeneratorModal = ({ isOpen, onClose, onComplete }: any) => {
 export default function NeuroMapApp() {
     const [view, setView] = useState<'landing' | 'app'>('landing');
     const [docs, setDocs] = useState<DocumentData[]>(() => { try{ return JSON.parse(localStorage.getItem(STORAGE_KEY)||'[]'); }catch(e){return [];} });
-    const [userStats, setUserStats] = useState<UserStats>({ shields: 5, streak: 3, totalReviews: 142, archetype: 'Sprinter' });
+    const [userStats] = useState<UserStats>({ shields: 5, streak: 3, totalReviews: 142, archetype: 'Sprinter' });
     const [currentDoc, setCurrentDoc] = useState<DocumentData | null>(null);
     const [activeNode, setActiveNode] = useState<MindMapNode | null>(null);
     const [docView, setDocView] = useState<'map' | 'timeline'>('map');
