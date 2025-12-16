@@ -1,3 +1,4 @@
+#NeuroMap to make 100% easy
 NeuroMap is an advanced, privacy-first learning platform that uses AI to transform any topic into interactive mind maps, adaptive flashcards, and personalized curriculums.
 This repository contains the complete "Omni-Tool" edition, featuring all research-backed learning accelerators and premium tools.
 ## Key Features
