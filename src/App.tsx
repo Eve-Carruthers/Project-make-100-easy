@@ -1,10 +1,12 @@
 import React, { useState, useEffect, useRef, useMemo, memo, createContext, useContext } from 'react';
-import { 
-  Brain, Layout, ChevronRight, ChevronLeft, ZoomIn, ZoomOut, Maximize, X, 
-  Clock, Settings, Share2, AlertTriangle, Zap, Award, Loader2, Sparkles, 
-  MessageSquare, Trophy, Save, Trash2, ShieldCheck, Mic, Play, Square, 
-  Calendar, GraduationCap, Mail, Radio, Target, Menu, FileText, CheckCircle2, XCircle, ArrowRight
+import {
+  Brain, Layout, ChevronRight, ChevronLeft, X,
+  Clock, Zap, Award, Loader2, Sparkles,
+  ShieldCheck, Mic, Play, Square,
+  Calendar, GraduationCap, Mail, Radio, Target, FileText, CheckCircle2, XCircle, ArrowRight, Activity, Shuffle
 } from 'lucide-react';
+import CauseCraftGame from './components/CauseCraftGame';
+import { DocumentData, MindMapNode, QuizItem, UserStats } from './types';
 
 /**
  * ---------------------------------------------------------------------
@@ -144,17 +146,6 @@ const LandingPage = ({ onEnter }: { onEnter: () => void }) => {
 const apiKey = ""; // Injected by runtime environment (e.g. import.meta.env.VITE_GEMINI_API_KEY)
 const STORAGE_KEY = "NEUROMAP_FINAL_DATA";
 
-// --- Resilience Utils ---
-const useOnlineStatus = () => {
-  const [isOnline, setIsOnline] = useState(navigator.onLine);
-  useEffect(() => {
-    const h = () => setIsOnline(navigator.onLine);
-    window.addEventListener('online', h); window.addEventListener('offline', h);
-    return () => { window.removeEventListener('online', h); window.removeEventListener('offline', h); };
-  }, []);
-  return isOnline;
-};
-
 // --- Toast Context ---
 interface Toast { id: string; type: 'success' | 'error'; message: string; }
 const ToastContext = createContext<{ addToast: (t: Omit<Toast, 'id'>) => void }>({ addToast: () => {} });
@@ -203,28 +194,6 @@ const callGemini = async (prompt: string, systemPrompt: string = "", retries = 2
       await new Promise(r => setTimeout(r, 1000));
     }
   }
-};
-
-// --- Types ---
-type NodeType = 'root' | 'topic' | 'subtopic' | 'week';
-interface QuizItem { id: string; question: string; options: string[]; correctIndex: number; userAnswer?: number; }
-interface MindMapNode {
-  id: string; text: string; type: NodeType; children?: MindMapNode[];
-  bloomLevel?: number; targetDate?: string; quiz?: QuizItem[]; quizScore?: number; isExpanded?: boolean;
-}
-interface RevisionCard {
-  id: string; nodeId: string; front: string; back: string; audioNote?: string;
-  sm2Data: { interval: number; easeFactor: number; step: number; nextReview: string; lastReviewed?: string; };
-}
-interface DocumentData {
-  id: string; title: string; type: 'mindmap' | 'curriculum';
-  uploadDate: string; lastModified: string; tree: MindMapNode; cards: RevisionCard[];
-}
-interface UserStats { shields: number; streak: number; totalReviews: number; archetype: 'Sprinter' | 'Steady' | 'Struggler'; }
-
-const ONBOARDING_DOC: DocumentData = {
-    id: 'doc-demo', title: 'Demo Project', type: 'mindmap', uploadDate: new Date().toISOString(), lastModified: new Date().toISOString(),
-    tree: { id: 'root', type: 'root', text: 'Central Topic', isExpanded: true, children: [{ id: '1', type: 'topic', text: 'Click Me for Tools', isExpanded: true }] }, cards: []
 };
 
 // --- Tool Components ---
@@ -380,14 +349,14 @@ const RevisionMode = ({ node, cards, onAddCards, onUpdateCard, onClose }: any) =
     );
 };
 
-const MindMapCanvas = memo(({ data, onNodeClick }: { data: MindMapNode, onNodeClick: (n: MindMapNode) => void }) => {
+const MindMapCanvas = memo(({ data, onNodeClick, onOpenGame }: { data: MindMapNode, onNodeClick: (n: MindMapNode) => void; onOpenGame?: (n: MindMapNode) => void }) => {
     const layout = useMemo(() => {
         const pos: Record<string, {x:number, y:number}> = {};
         let cy = 0;
-        const traverse = (n: MindMapNode, d: number) => {
+        const traverse = (n: MindMapNode, d: number): number => {
             if(!n.children?.length) { pos[n.id] = {x: 50+d*280, y: cy}; cy += 100; return cy; }
-            const ys = n.children.map(c => traverse(c, d+1));
-            const y = (Math.min(...ys)+Math.max(...ys))/2;
+            const ys: number[] = n.children.map(c => traverse(c, d+1));
+            const y: number = (Math.min(...ys)+Math.max(...ys))/2;
             pos[n.id] = {x: 50+d*280, y};
             return y;
         };
@@ -411,12 +380,22 @@ const MindMapCanvas = memo(({ data, onNodeClick }: { data: MindMapNode, onNodeCl
             {Object.entries(layout).map(([id, p]) => {
                 const n = find(data, id); if(!n) return null;
                 return (
-                    <div key={id} onClick={() => onNodeClick(n)} className="absolute w-64 p-4 bg-white rounded-xl border-2 border-slate-100 hover:border-indigo-400 shadow-sm cursor-pointer transition-all hover:scale-105" style={{left: p.x, top: p.y}}>
+                    <div key={id} onClick={() => onNodeClick(n)} className="absolute w-64 p-4 bg-white rounded-xl border-2 border-slate-100 hover:border-indigo-400 shadow-sm cursor-pointer transition-all hover:scale-105 relative" style={{left: p.x, top: p.y}}>
                          <div className="flex justify-between mb-2">
                              <span className="text-[10px] bg-slate-100 text-slate-500 px-2 py-0.5 rounded uppercase font-bold tracking-wider">{n.type}</span>
                              {n.quizScore!==undefined && <span className="text-[10px] bg-green-100 text-green-700 px-2 py-0.5 rounded font-bold flex items-center gap-1"><Award className="w-3 h-3"/> {n.quizScore}%</span>}
                         </div>
                         <div className="font-bold text-sm text-slate-800 line-clamp-2">{n.text}</div>
+                        {onOpenGame && n.type !== 'root' && (
+                          <button
+                            onClick={(e) => { e.stopPropagation(); onOpenGame(n); }}
+                            className="absolute -top-2 -right-2 w-6 h-6 bg-amber-400 rounded-full flex items-center justify-center text-white hover:bg-amber-500"
+                            title="Play CauseCraft"
+                            aria-label="Play CauseCraft"
+                          >
+                            <Shuffle className="w-3 h-3" />
+                          </button>
+                        )}
                     </div>
                 );
             })}
@@ -511,14 +490,37 @@ const GeneratorModal = ({ isOpen, onClose, onComplete }: any) => {
 export default function NeuroMapApp() {
     const [view, setView] = useState<'landing' | 'app'>('landing');
     const [docs, setDocs] = useState<DocumentData[]>(() => { try{ return JSON.parse(localStorage.getItem(STORAGE_KEY)||'[]'); }catch(e){return [];} });
-    const [userStats, setUserStats] = useState<UserStats>({ shields: 5, streak: 3, totalReviews: 142, archetype: 'Sprinter' });
+    const [userStats] = useState<UserStats>({ shields: 5, streak: 3, totalReviews: 142, archetype: 'Sprinter' });
     const [currentDoc, setCurrentDoc] = useState<DocumentData | null>(null);
     const [activeNode, setActiveNode] = useState<MindMapNode | null>(null);
     const [docView, setDocView] = useState<'map' | 'timeline'>('map');
     const [modal, setModal] = useState<'gen' | 'digest' | null>(null);
+    const [showGame, setShowGame] = useState(false);
+    const [gameSeed, setGameSeed] = useState<MindMapNode[]>([]);
 
     useEffect(() => localStorage.setItem(STORAGE_KEY, JSON.stringify(docs)), [docs]);
     const updateDoc = (d: DocumentData) => { setCurrentDoc(d); setDocs(prev => prev.map(x => x.id === d.id ? d : x)); };
+
+    const flattenNodes = (node: MindMapNode | null): MindMapNode[] => node ? [node, ...(node.children?.flatMap(flattenNodes) || [])] : [];
+    const findParent = (node: MindMapNode, targetId: string): MindMapNode | null => {
+        if (node.children?.some(c => c.id === targetId)) return node;
+        for (const child of node.children || []) {
+            const found = findParent(child, targetId);
+            if (found) return found;
+        }
+        return null;
+    };
+
+    const openCauseCraft = (node: MindMapNode) => {
+        if (!currentDoc) return;
+        const parent = findParent(currentDoc.tree, node.id);
+        const sibling = parent?.children?.find(c => c.id !== node.id);
+        const flat = flattenNodes(currentDoc.tree).filter(n => n.type !== 'root');
+        const fallback = flat.find(n => n.id !== node.id);
+        const seeds = sibling ? [node, sibling] : fallback ? [node, fallback] : [node];
+        setGameSeed(seeds);
+        setShowGame(true);
+    };
 
     if (view === 'landing') return <LandingPage onEnter={() => setView('app')} />;
 
@@ -581,7 +583,7 @@ export default function NeuroMapApp() {
                                 </div>
                             </div>
                             <div className="flex-grow relative bg-slate-50 overflow-hidden">
-                                {docView === 'map' ? <MindMapCanvas data={currentDoc.tree} onNodeClick={n=>n.type!=='root'&&setActiveNode(n)}/> 
+                                {docView === 'map' ? <MindMapCanvas data={currentDoc.tree} onNodeClick={n=>n.type!=='root'&&setActiveNode(n)} onOpenGame={openCauseCraft}/>
                                 : <TimelineView data={currentDoc.tree} onNodeClick={n=>n.type!=='root'&&setActiveNode(n)}/>}
                                 
                                 <div className={`absolute top-0 right-0 w-[480px] h-full bg-white shadow-2xl transition-transform duration-300 z-30 ${activeNode ? 'translate-x-0' : 'translate-x-full'}`}>
@@ -605,6 +607,7 @@ export default function NeuroMapApp() {
                 </div>
 
                 <GeneratorModal isOpen={modal === 'gen'} onClose={() => setModal(null)} onComplete={(d:any) => { setDocs([d, ...docs]); setCurrentDoc(d); setModal(null); }} />
+                {showGame && <CauseCraftGame nodes={gameSeed} callGemini={callGemini} onClose={() => setShowGame(false)} />}
             </div>
         </ToastProvider>
     );
